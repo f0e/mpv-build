@@ -1,0 +1,157 @@
+diff --git a/video/out/opengl/context_android.c b/video/out/opengl/context_android.c
+index 85fb427..fd49845 100644
+--- a/video/out/opengl/context_android.c
++++ b/video/out/opengl/context_android.c
+@@ -15,13 +15,19 @@
+  * License along with mpv.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
++#include <math.h>
++#include <string.h>
++
+ #include <EGL/egl.h>
+ #include <EGL/eglext.h>
++#include <libplacebo/colorspace.h>
+ 
+ #include "video/out/android_common.h"
+ #include "egl_helpers.h"
+ #include "common/common.h"
+ #include "context.h"
++#include "video/mp_image.h"
++#include "video/out/vo.h"
+ 
+ #ifndef EGL_GL_COLORSPACE_KHR
+ #define EGL_GL_COLORSPACE_KHR 0x309D
+@@ -30,16 +36,117 @@
+ #define EGL_GL_COLORSPACE_BT2020_PQ_EXT 0x3340
+ #endif
+ 
++// EGL_EXT_surface_SMPTE2086_metadata / EGL_EXT_surface_CTA861_3_metadata
++#ifndef EGL_SMPTE2086_DISPLAY_PRIMARY_RX_EXT
++#define EGL_SMPTE2086_DISPLAY_PRIMARY_RX_EXT 0x3341
++#define EGL_SMPTE2086_DISPLAY_PRIMARY_RY_EXT 0x3342
++#define EGL_SMPTE2086_DISPLAY_PRIMARY_GX_EXT 0x3343
++#define EGL_SMPTE2086_DISPLAY_PRIMARY_GY_EXT 0x3344
++#define EGL_SMPTE2086_DISPLAY_PRIMARY_BX_EXT 0x3345
++#define EGL_SMPTE2086_DISPLAY_PRIMARY_BY_EXT 0x3346
++#define EGL_SMPTE2086_WHITE_POINT_X_EXT 0x3347
++#define EGL_SMPTE2086_WHITE_POINT_Y_EXT 0x3348
++#define EGL_SMPTE2086_MAX_LUMINANCE_EXT 0x3349
++#define EGL_SMPTE2086_MIN_LUMINANCE_EXT 0x334A
++#endif
++#ifndef EGL_METADATA_SCALING_EXT
++#define EGL_METADATA_SCALING_EXT 50000
++#endif
++#ifndef EGL_CTA861_3_MAX_CONTENT_LIGHT_LEVEL_EXT
++#define EGL_CTA861_3_MAX_CONTENT_LIGHT_LEVEL_EXT 0x3360
++#define EGL_CTA861_3_MAX_FRAME_AVERAGE_LEVEL_EXT 0x3361
++#endif
++
+ struct priv {
+     struct GL gl;
+     EGLDisplay egl_display;
+     EGLContext egl_context;
+     EGLSurface egl_surface;
++
++    // HDR metadata forwarding for the bt2020-pq surface
++    bool pq_surface;
++    bool has_smpte2086;
++    bool has_cta861_3;
++    bool hdr_sent;
++    struct pl_hdr_metadata hdr;
+ };
+ 
++static EGLint egl_metadata_value(float v)
++{
++    return (EGLint)lrintf(v * EGL_METADATA_SCALING_EXT);
++}
++
++static bool hdr_static_equal(const struct pl_hdr_metadata *a,
++                             const struct pl_hdr_metadata *b)
++{
++    return !memcmp(&a->prim, &b->prim, sizeof(a->prim)) &&
++           a->min_luma == b->min_luma && a->max_luma == b->max_luma &&
++           a->max_cll == b->max_cll && a->max_fall == b->max_fall;
++}
++
++// The bt2020-pq surface carries no HDR metadata by itself, so SurfaceFlinger
++// would tone map PQ content against its default 1000 nit assumption (and the
++// display pipeline loses MaxCLL/mastering entirely). Forward the video's static
++// HDR10 metadata through the EGL surface attributes, which Android applies to
++// the buffers queued by the next eglSwapBuffers.
++static void update_hdr_metadata(struct ra_ctx *ctx)
++{
++    struct priv *p = ctx->priv;
++    if (!p->pq_surface || !(p->has_smpte2086 || p->has_cta861_3))
++        return;
++
++    struct pl_hdr_metadata hdr = {0};
++    struct vo *vo = ctx->vo;
++    mp_mutex_lock(&vo->params_mutex);
++    if (vo->params)
++        hdr = vo->params->color.hdr;
++    mp_mutex_unlock(&vo->params_mutex);
++
++    if (p->hdr_sent && hdr_static_equal(&hdr, &p->hdr))
++        return;
++    p->hdr = hdr;
++    p->hdr_sent = true;
++
++    EGLDisplay d = p->egl_display;
++    EGLSurface s = p->egl_surface;
++    bool ok = true;
++
++    if (p->has_smpte2086 && hdr.max_luma > 0) {
++        struct pl_raw_primaries prim = hdr.prim;
++        if (!pl_primaries_valid(&prim))
++            prim = *pl_raw_primaries_get(PL_COLOR_PRIM_BT_2020);
++        const struct { EGLint attr; float v; } md[] = {
++            {EGL_SMPTE2086_DISPLAY_PRIMARY_RX_EXT, prim.red.x},
++            {EGL_SMPTE2086_DISPLAY_PRIMARY_RY_EXT, prim.red.y},
++            {EGL_SMPTE2086_DISPLAY_PRIMARY_GX_EXT, prim.green.x},
++            {EGL_SMPTE2086_DISPLAY_PRIMARY_GY_EXT, prim.green.y},
++            {EGL_SMPTE2086_DISPLAY_PRIMARY_BX_EXT, prim.blue.x},
++            {EGL_SMPTE2086_DISPLAY_PRIMARY_BY_EXT, prim.blue.y},
++            {EGL_SMPTE2086_WHITE_POINT_X_EXT, prim.white.x},
++            {EGL_SMPTE2086_WHITE_POINT_Y_EXT, prim.white.y},
++            {EGL_SMPTE2086_MAX_LUMINANCE_EXT, hdr.max_luma},
++            {EGL_SMPTE2086_MIN_LUMINANCE_EXT, hdr.min_luma},
++        };
++        for (int i = 0; i < MP_ARRAY_SIZE(md); i++)
++            ok &= eglSurfaceAttrib(d, s, md[i].attr, egl_metadata_value(md[i].v));
++    }
++
++    if (p->has_cta861_3 && (hdr.max_cll > 0 || hdr.max_fall > 0)) {
++        ok &= eglSurfaceAttrib(d, s, EGL_CTA861_3_MAX_CONTENT_LIGHT_LEVEL_EXT,
++                               egl_metadata_value(hdr.max_cll));
++        ok &= eglSurfaceAttrib(d, s, EGL_CTA861_3_MAX_FRAME_AVERAGE_LEVEL_EXT,
++                               egl_metadata_value(hdr.max_fall));
++    }
++
++    MP_VERBOSE(ctx, "HDR surface metadata: mastering %.4f-%.0f nits, "
++               "MaxCLL %.0f, MaxFALL %.0f%s\n", hdr.min_luma, hdr.max_luma,
++               hdr.max_cll, hdr.max_fall, ok ? "" : " (rejected by EGL)");
++}
++
+ static void android_swap_buffers(struct ra_ctx *ctx)
+ {
+     struct priv *p = ctx->priv;
++    update_hdr_metadata(ctx);
+     eglSwapBuffers(p->egl_display, p->egl_surface);
+ }
+ 
+@@ -94,7 +201,13 @@ static bool android_init(struct ra_ctx *ctx)
+             surface_attribs[0] = EGL_GL_COLORSPACE_KHR;
+             surface_attribs[1] = EGL_GL_COLORSPACE_BT2020_PQ_EXT;
+             surface_attribs[2] = EGL_NONE;
+-            MP_VERBOSE(ctx, "Creating BT.2020 PQ window surface.\n");
++            p->pq_surface = true;
++            p->has_smpte2086 = strstr(exts, "EGL_EXT_surface_SMPTE2086_metadata");
++            p->has_cta861_3 = strstr(exts, "EGL_EXT_surface_CTA861_3_metadata");
++            MP_VERBOSE(ctx, "Creating BT.2020 PQ window surface (metadata: "
++                       "SMPTE2086 %s, CTA861.3 %s).\n",
++                       p->has_smpte2086 ? "yes" : "no",
++                       p->has_cta861_3 ? "yes" : "no");
+         } else {
+             MP_WARN(ctx, "bt2020-pq surface requested but "
+                     "EGL_EXT_gl_colorspace_bt2020_pq is unavailable; "

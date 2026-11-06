@@ -128,6 +128,7 @@ jobs:
                 subprocess.run(['bash', 'scripts/test_lavc_busy_policy.sh', str(dest)], check=True)
                 subprocess.run(['bash', 'scripts/test_player_queue_frames.sh', str(dest)], check=True)
                 subprocess.run(['bash', 'scripts/test_audio_reload_held_frame.sh', str(dest)], check=True)
+                subprocess.run(['bash', 'scripts/test_android_hdr_surface_metadata.sh', str(dest)], check=True)
                 subprocess.run(['bash', 'scripts/test_player_release_held_frame.sh', str(dest)], check=True)
                 subprocess.run(['bash', 'scripts/test_demux_refresh.sh', str(dest)], check=True)
                 subprocess.run(['bash', 'scripts/test_av_log_routing.sh', str(dest)], check=True)

@@ -206,6 +206,7 @@ header says what it covers. "PR" is `ci.yml`, "main" is `publish.yml`.
 | `test_build_process.sh` | the Swift driver's process launch: output capture and exit codes | main |
 | `platforms/linux/test.sh` | the linux driver's build plan and configure flags, all tools stubbed | PR |
 | `platforms/windows/test_pin_packages.py` (python3) | `pin_packages.py` rewrites winbuild's packages onto the pins | PR |
+| `test_android_hdr_surface_metadata.sh` | the HDR10 metadata sent with the bt2020-pq EGL surface: real values only, never mpv's 10000 nit guess, re-sent only on change (patch 0216) | PR, main |
 | `test_ao_avfoundation_fallback.sh` | AVPlayer sink: PCM fallback, no-resource-request log, clock anchor; the test drives the clock and feed ticks (macOS) | PR |
 | `test_ao_compressed_audio_option.sh` | the compressed-audio option contract (patch 0019) | main |
 | `test_ao_pcm_lookahead.sh` | bounded PCM lookahead (patch 0015) | main |
